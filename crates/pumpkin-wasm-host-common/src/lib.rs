@@ -5,6 +5,7 @@
 
 pub mod args;
 pub mod concurrent_store;
+pub mod fill;
 pub mod logging;
 pub mod plugin;
 pub mod scheduler;

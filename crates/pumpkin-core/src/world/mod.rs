@@ -147,8 +147,9 @@ use pumpkin_util::{
     math::{boundingbox::BoundingBox, position::BlockPos, vector3::Vector3},
 };
 use pumpkin_util::{
+    math::pool::{Pool, Weighted},
     math::{get_section_cord, position::chunk_section_from_pos, vector2::Vector2},
-    random::{RandomImpl, get_seed, xoroshiro128::Xoroshiro},
+    random::{RandomGenerator, RandomImpl, get_seed, xoroshiro128::Xoroshiro},
 };
 use pumpkin_world::world::{GetBlockError, WorldPortalExt};
 use pumpkin_world::{
@@ -1824,6 +1825,85 @@ impl World {
         for (pos, state_id) in changes {
             guard.insert(*pos, *state_id);
         }
+    }
+
+    /// Fills the cuboid between `min` and `max` (inclusive) with states drawn from `palette`.
+    ///
+    /// Like `/fill ... strict`, each chunk is written in one batch and clients get one batched
+    /// update, with no block callbacks or neighbour updates. Unlike `/fill`, lighting is updated
+    /// for blocks whose light properties changed. Unloaded chunks are skipped.
+    /// Returns how many blocks changed state.
+    pub fn fill_cuboid_weighted(
+        &self,
+        min: BlockPos,
+        max: BlockPos,
+        palette: &[Weighted<BlockStateId>],
+        seed: u64,
+    ) -> usize {
+        let (min_x, max_x) = (min.0.x.min(max.0.x), min.0.x.max(max.0.x));
+        let (min_y, max_y) = (min.0.y.min(max.0.y), min.0.y.max(max.0.y));
+        let (min_z, max_z) = (min.0.z.min(max.0.z), min.0.z.max(max.0.z));
+        let mut random = RandomGenerator::Xoroshiro(Xoroshiro::from_seed(seed));
+
+        let mut changed = Vec::new();
+        let mut relight = Vec::new();
+        for chunk_x in (min_x >> 4)..=(max_x >> 4) {
+            for chunk_z in (min_z >> 4)..=(max_z >> 4) {
+                let start_x = (min_x - (chunk_x << 4)).clamp(0, 15) as usize;
+                let end_x = (max_x - (chunk_x << 4)).clamp(0, 15) as usize;
+                let start_z = (min_z - (chunk_z << 4)).clamp(0, 15) as usize;
+                let end_z = (max_z - (chunk_z << 4)).clamp(0, 15) as usize;
+                let mut updates = Vec::new();
+                for y in min_y..=max_y {
+                    for z in start_z..=end_z {
+                        for x in start_x..=end_x {
+                            let Some(&state_id) = Pool::get(palette, &mut random) else {
+                                return 0;
+                            };
+                            updates.push((x, y, z, state_id));
+                        }
+                    }
+                }
+
+                let chunk_pos = Vector2::new(chunk_x, chunk_z);
+                let written = self.level.read_chunk_sync(&chunk_pos, |chunk| {
+                    let replaced = chunk.set_blocks_batch(updates.iter().copied());
+                    let written: Vec<_> = updates
+                        .iter()
+                        .zip(replaced)
+                        .filter(|((.., new_id), (.., old_id))| new_id != old_id)
+                        .map(|(&(x, y, z, new_id), (.., old_id))| {
+                            let pos = BlockPos::new(
+                                (chunk_x << 4) + x as i32,
+                                y,
+                                (chunk_z << 4) + z as i32,
+                            );
+                            (pos, old_id, new_id)
+                        })
+                        .collect();
+                    if !written.is_empty() && !chunk.is_dirty() {
+                        chunk.mark_dirty(true);
+                    }
+                    written
+                });
+                for (pos, old_id, new_id) in written.into_iter().flatten() {
+                    if pumpkin_world::lighting::LightEngine::has_different_light_properties(
+                        old_id.to_state(),
+                        new_id.to_state(),
+                    ) {
+                        relight.push(pos);
+                    }
+                    changed.push((pos, new_id));
+                }
+            }
+        }
+
+        self.queue_block_updates(&changed);
+        self.flush_block_updates();
+        for pos in relight {
+            self.level.light_engine.update_lighting_at(&self.level, pos);
+        }
+        changed.len()
     }
 
     #[expect(clippy::too_many_lines)]

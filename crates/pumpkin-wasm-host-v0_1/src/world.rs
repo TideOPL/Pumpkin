@@ -2,6 +2,7 @@ use pumpkin_data::block_properties::NoteblockInstrument as InternalNoteblockInst
 use pumpkin_data::block_state::PistonBehavior;
 use pumpkin_data::{BlockDirection as InternalBlockDirection, BlockId, BlockStateId};
 use pumpkin_util::math::position::BlockPos;
+use pumpkin_wasm_host_common::fill::{check_fill_volume, fill_palette};
 use pumpkin_world::chunk::ChunkHeightmapType;
 use pumpkin_world::chunk::io::Dirtiable;
 use pumpkin_world::world::BlockFlags;
@@ -1275,6 +1276,33 @@ impl pumpkin::plugin::world::HostWorldWithStore<PluginHostState> for HasSelf<Plu
         };
         let default_state_id = pumpkin_data::Block::from_id(id).default_state.id.as_u16();
         set_block_state_with_store(host, world, pos, default_state_id, update_flags).await
+    }
+
+    async fn fill_cuboid(
+        mut host: Access<'_, PluginHostState, Self>,
+        world: Resource<World>,
+        min: WitBlockPos,
+        max: WitBlockPos,
+        palette: Vec<pumpkin::plugin::world::WeightedBlockState>,
+        seed: u64,
+    ) -> wasmtime::Result<Result<u32, String>> {
+        let palette = match fill_palette(palette.into_iter().map(|e| (e.state, e.weight))) {
+            Ok(palette) => palette,
+            Err(err) => return Ok(Err(err)),
+        };
+        let min = BlockPos::new(min.x, min.y, min.z);
+        let max = BlockPos::new(max.x, max.y, max.z);
+        let (world, plugin) = world_and_plugin(host.get(), &world)?;
+        if let Err(err) = check_fill_volume(&world, min, max) {
+            return Ok(Err(err));
+        }
+        let changed = plugin
+            .store
+            .pump_blocking(&mut host, move || {
+                world.fill_cuboid_weighted(min, max, &palette, seed)
+            })
+            .await?;
+        Ok(Ok(u32::try_from(changed).unwrap_or(u32::MAX)))
     }
 
     async fn set_block_by_name(

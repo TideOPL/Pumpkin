@@ -787,6 +787,12 @@ interface %world {
     }
 
     /// Represents a Minecraft world (dimension).
+    /// A block state and its relative weight in a `fill-cuboid` palette.
+    record weighted-block-state {
+        state: u16,
+        weight: u32,
+    }
+
     resource %world {
         /// Returns the unique identifier of this world.
         get-id: func() -> string;
@@ -824,6 +830,13 @@ interface %world {
         /// Sets the block at the specified position by namespaced name using its default state.
         /// Returns true if the block was recognized and set.
         set-block-by-name: func(pos: block-pos, name: string, update-flags: block-flags) -> bool;
+
+        /// Fills the cuboid between `min` and `max` (inclusive) with block states picked at random from
+        /// `palette` by weight, reproducibly for the same `seed`. Writes whole chunks at once and skips
+        /// block callbacks and neighbour updates, like `/fill ... strict`; lighting is still updated.
+        /// Unloaded chunks are skipped. Fails if the palette is empty or the volume exceeds the
+        /// `max_block_modifications` game rule. Returns the number of blocks that changed.
+        fill-cuboid: func(min: block-pos, max: block-pos, palette: list<weighted-block-state>, seed: u64) -> result<u32, string>;
 
         /// Returns the current time of day in ticks.
         get-time-of-day: func() -> u64;
